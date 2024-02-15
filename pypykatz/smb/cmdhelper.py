@@ -86,6 +86,7 @@ class SMBCMDHelper:
 		smb_regsec_group.add_argument('url', help="SMB connection string. Example: 'smb2+ntlm-password://TEST\\Administrator:QLFbT8zkiFGlJuf0B3Qq@10.10.10.102'")
 		smb_regsec_group.add_argument('-o', '--outfile', help = 'Save results to file (you can specify --json for json file, or text format will be written)')
 		smb_regsec_group.add_argument('--json', action='store_true',help = 'Print credentials in JSON format')
+		smb_regsec_group.add_argument('--use-software', action='store_true',help = 'enable parsing of HKLM\\SOFTWARE (time consuming)')
 		smb_regsec_group.add_argument('-t', '--target', nargs='*', help="Files/IPs/Hostnames for targets")
 		smb_regsec_group.add_argument('-w', '--worker-count', type=int, default = 10, help="Number of parallell enum workers. Always one worker/host")
 
@@ -103,7 +104,7 @@ class SMBCMDHelper:
 		smb_secretsdump_group.add_argument('-g', '--grep', action='store_true', help = 'Print credentials in greppable format')
 		smb_secretsdump_group.add_argument('--chunksize', type=int, default=64*1024, help = 'Chunksize for file data retrival')
 		smb_secretsdump_group.add_argument('-p','--packages', choices = ['all','msv', 'wdigest', 'tspkg', 'ssp', 'livessp', 'dpapi', 'cloudap'], nargs="+", default = 'all', help = 'LSASS package to parse')
-
+		smb_secretsdump_group.add_argument('--use-software', action='store_true',help = 'enable parsing of HKLM\\SOFTWARE (time consuming)')
 
 
 		smb_shareenum_parser = smb_subparsers.add_parser('shareenum', help = 'SMB share enumerator')
@@ -460,15 +461,34 @@ class SMBCMDHelper:
 				logger.exception('[SECRETSDUMP] Failed to get LSASS secrets')
 			
 			try:
-				po = await regdump(args.url)
-				if po is not None:
-					if args.outfile:
-						po.to_file(args.outfile+'_registry.txt', args.json)
-					else:
-						if args.json:
-							print(json.dumps(po.to_dict(), cls = UniversalEncoder, indent=4, sort_keys=True))
+				smb_secretsdump_hives=['HKLM\\SAM', 'HKLM\\SYSTEM', 'HKLM\\SECURITY']
+				if args.use_software:
+					smb_secretsdump_hives += ['HKLM\\SOFTWARE']
+					print("dumping software keys also")
+
+				async for tid, po, err in regdump(args.url, hives=smb_secretsdump_hives):
+					if err is not None:
+						if args.outfile:
+							with open(args.outfile, 'a') as f:
+								f.write('[%s][ERROR]%s' % (tid, str(err)))
 						else:
-							print(str(po))
+							print('[%s][ERROR]%s' % (tid, str(err)))
+						
+						continue
+
+					if po is not None:
+						if args.outfile:
+							po.to_file(args.outfile+'_registry.' + 'json' if args.json else 'txt', args.json)
+						else:
+							if args.json:
+								print(json.dumps(po.to_dict(), cls = UniversalEncoder, indent=4, sort_keys=True))
+							else:
+								buffer = ''
+								for line in str(po).split('\n'):
+									buffer += '[%s] ' % tid 
+									buffer += line + '\r\n'
+								print(buffer)
+
 			except Exception as e:
 				logger.exception('[SECRETSDUMP] Failed to get registry secrets')
 			
@@ -506,7 +526,11 @@ class SMBCMDHelper:
 		
 		elif args.smb_module == 'regdump':
 			from pypykatz.smb.regutils import regdump
-			async for tid, po, err in regdump(args.url, targets=args.target, worker_cnt = args.worker_count):
+			smb_regdump_hives=['HKLM\\SAM', 'HKLM\\SYSTEM', 'HKLM\\SECURITY']
+			if args.use_software:
+				smb_regdump_hives += ['HKLM\\SOFTWARE']
+			
+			async for tid, po, err in regdump(args.url, hives=smb_regdump_hives, targets=args.target, worker_cnt = args.worker_count):
 				if err is not None:
 					if args.outfile:
 						with open(args.outfile, 'a') as f:
